@@ -30,7 +30,7 @@ jobs:
       - name: 运行监控
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK || vars.WECOM_WEBHOOK }}
-          THRESHOLD: '5000'
+          THRESHOLD: ${{ vars.THRESHOLD || '5000' }}
           FORCE: ${{ inputs.force }}
         run: python3 monitor_actions.py
 
