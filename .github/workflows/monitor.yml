@@ -7,6 +7,11 @@ on:
     - cron: '*/5 2-6 * * 1-5'     # 北京 10:00 - 14:55
     - cron: '0 7 * * 1-5'         # 北京 15:00（收盘检测）
   workflow_dispatch:              # 支持手动触发测试
+    inputs:
+      force:
+        description: '跳过时段闸门（测试用）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write                 # 允许回写 state.json（同时保活仓库，避免 60 天被停用）
@@ -26,13 +31,14 @@ jobs:
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK || vars.WECOM_WEBHOOK }}
           THRESHOLD: '5000'
+          FORCE: ${{ inputs.force }}
         run: python3 monitor_actions.py
 
       - name: 提交状态文件
         run: |
           git config user.name "monitor-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add state.json
+          git add state.json 2>/dev/null || { echo "无状态文件，跳过提交"; exit 0; }
           if git diff --cached --quiet; then
             echo "状态无变化，跳过提交"
           else
