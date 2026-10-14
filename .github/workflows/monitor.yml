@@ -1,0 +1,41 @@
+name: A股下跌家数监控
+
+on:
+  schedule:
+    # 全部为 UTC。北京时间 = UTC + 8，监控窗口：工作日 9:25 - 15:00
+    - cron: '25-55/5 1 * * 1-5'   # 北京 9:25 - 9:55
+    - cron: '*/5 2-6 * * 1-5'     # 北京 10:00 - 14:55
+    - cron: '0 7 * * 1-5'         # 北京 15:00（收盘检测）
+  workflow_dispatch:              # 支持手动触发测试
+
+permissions:
+  contents: write                 # 允许回写 state.json（同时保活仓库，避免 60 天被停用）
+
+concurrency:
+  group: astock-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 运行监控
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK || vars.WECOM_WEBHOOK }}
+          THRESHOLD: '5000'
+        run: python3 monitor_actions.py
+
+      - name: 提交状态文件
+        run: |
+          git config user.name "monitor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "状态无变化，跳过提交"
+          else
+            git commit -m "chore: 更新监控状态 [skip ci]"
+            git push
+          fi
