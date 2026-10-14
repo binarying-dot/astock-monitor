@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 THRESHOLD = int(os.environ.get("THRESHOLD", "5000"))
 WECOM_WEBHOOK = (os.environ.get("WECOM_WEBHOOK") or "").strip()
+FORCE = (os.environ.get("FORCE") or "").strip().lower() in ("1", "true", "yes")
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -254,20 +255,23 @@ def main():
     t = now_cn()
     today = t.strftime("%Y-%m-%d")
 
-    # ---- 时段闸门（工作日 9:25-15:00，午休跳过）----
-    if t.weekday() >= 5:
-        log("周末休市，退出")
-        return 0
-    tt = t.time()
-    if not (dt.time(9, 25) <= tt <= dt.time(15, 0)):
-        log("非监控时段（%s），退出" % t.strftime("%H:%M"))
-        return 0
-    if dt.time(11, 30) < tt < dt.time(13, 0):
-        log("午间休市，退出")
-        return 0
-    if not is_trading_day_now():
-        log("今日为节假日休市，退出")
-        return 0
+    # ---- 时段闸门（工作日 9:25-15:00，午休跳过；FORCE=1 时为测试跳过）----
+    if not FORCE:
+        if t.weekday() >= 5:
+            log("周末休市，退出")
+            return 0
+        tt = t.time()
+        if not (dt.time(9, 25) <= tt <= dt.time(15, 0)):
+            log("非监控时段（%s），退出" % t.strftime("%H:%M"))
+            return 0
+        if dt.time(11, 30) < tt < dt.time(13, 0):
+            log("午间休市，退出")
+            return 0
+        if not is_trading_day_now():
+            log("今日为节假日休市，退出")
+            return 0
+    else:
+        log("⚠️ FORCE 测试模式：跳过时段闸门")
 
     # ---- 抓取 ----
     try:
