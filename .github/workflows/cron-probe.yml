@@ -14,3 +14,4 @@ jobs:
         run: |
           echo "schedule 触发成功"
           date -u '+UTC %Y-%m-%d %H:%M:%S'
+# resync: 2026-10-15
