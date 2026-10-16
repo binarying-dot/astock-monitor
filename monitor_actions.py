@@ -31,12 +31,24 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.jso
 # 自行循环检测，直到收盘为止。这样触发频率再低也能覆盖大半个交易日。
 INTERVAL_MIN = int(os.environ.get("INTERVAL_MIN", "5"))     # 循环内检测间隔（分钟）
 LOOP_ENABLED = (os.environ.get("LOOP", "1").strip().lower() not in ("0", "false", "no"))
-SESSION_START = dt.time(9, 25)      # 开盘后开始检测
-SESSION_END = dt.time(15, 0)        # 收盘
-READY_FROM = dt.time(9, 15)         # 早于此时刻被触发则直接退出（无法覆盖完整时段）
+
+
+def _hhmm(value, default):
+    try:
+        h, m = str(value).split(":")
+        return dt.time(int(h), int(m))
+    except Exception:
+        return default
+
+
+SESSION_START = _hhmm(os.environ.get("SESSION_START"), dt.time(9, 25))   # 开始检测
+SESSION_END = _hhmm(os.environ.get("SESSION_END"), dt.time(15, 0))       # 收盘
+READY_FROM = _hhmm(os.environ.get("READY_FROM"), dt.time(9, 15))         # 早于此时刻触发则退出
 LUNCH_START = dt.time(11, 30)
 LUNCH_END = dt.time(13, 0)
 MAX_LOOP_SECONDS = 345 * 60         # 单次 job 最长循环 5h45m（GitHub 单 job 上限 6h）
+# 仅用于验证「循环本身」的低成本测试模式：跳过时段闸门，按上面的自定义窗口循环
+LOOP_TEST = (os.environ.get("LOOP_TEST") or "").strip().lower() in ("1", "true", "yes")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -322,6 +334,12 @@ def main():
         run_check(today)
         return 0
 
+    if LOOP_TEST:
+        log("⚠️ LOOP_TEST 模式：跳过时段闸门，按自定义窗口循环"
+            "（%s - %s，间隔 %d 分钟）"
+            % (SESSION_START.strftime("%H:%M"), SESSION_END.strftime("%H:%M"), INTERVAL_MIN))
+        return session_loop(today)
+
     # ---- 时段闸门 ----
     if t.weekday() >= 5:
         log("周末休市，退出")
@@ -340,24 +358,29 @@ def main():
     # 9:15-9:25 之间被触发：等到 9:25 再开始，以覆盖整个时段
     if tt < SESSION_START:
         wait_s = (dt.datetime.combine(t.date(), SESSION_START) - t).total_seconds()
-        log("早于开盘 %.1f 分钟，等待至 09:25 开始" % (wait_s / 60.0))
+        log("早于开盘 %.1f 分钟，等待至 %s 开始"
+            % (wait_s / 60.0, SESSION_START.strftime("%H:%M")))
         time.sleep(max(0.0, wait_s))
 
     if not LOOP_ENABLED:
         run_check(today)
         return 0
 
-    # ---- 会话循环：一次触发覆盖到收盘 ----
+    return session_loop(today)
+
+
+def session_loop(today):
+    """一次触发后循环检测到收盘，避免受 GitHub cron 触发频率限制。"""
     loop_t0 = time.time()
-    log("进入会话循环：每 %d 分钟检测一次，直至 15:00 收盘" % INTERVAL_MIN)
+    log("进入会话循环：每 %d 分钟检测一次，直至 %s"
+        % (INTERVAL_MIN, SESSION_END.strftime("%H:%M")))
     rounds = 0
     while now_cn().time() <= SESSION_END:
         if time.time() - loop_t0 > MAX_LOOP_SECONDS:
             log("已达单次会话时长上限，本轮结束（下次触发将继续覆盖）")
             break
 
-        nxt = now_cn().time()
-        if LUNCH_START < nxt < LUNCH_END:
+        if not LOOP_TEST and LUNCH_START < now_cn().time() < LUNCH_END:
             log("午间休市（%s），%d 分钟后继续" % (now_cn().strftime("%H:%M"), INTERVAL_MIN))
             time.sleep(INTERVAL_MIN * 60)
             continue
