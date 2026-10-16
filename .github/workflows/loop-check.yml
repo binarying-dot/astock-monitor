@@ -1,0 +1,22 @@
+name: loop-check（临时验证）
+
+# 临时工作流：验证「一次触发后在云端循环检测」是否真的能持续运行。
+# 验证完成后会被删除。
+on:
+  workflow_dispatch:
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: 循环验证
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK || vars.WECOM_WEBHOOK }}
+          THRESHOLD: '999999'
+          LOOP_TEST: '1'
+          SESSION_START: '16:25'
+          SESSION_END: '16:29'
+          INTERVAL_MIN: '1'
+        run: python3 monitor_actions.py
