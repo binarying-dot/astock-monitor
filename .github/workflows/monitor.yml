@@ -1,33 +1,34 @@
 name: A股下跌家数监控
 
+# 说明：
+# GitHub 免费账号的 cron 触发极不规律（实测每 1-2 小时才真正触发一次），
+# 因此策略是「提高触发机会 + 单次触发后自行循环覆盖整个交易时段」。
+# 脚本内部有严格的时段闸门：非交易时段毫秒级退出，不会浪费资源。
 on:
   schedule:
-    # 全部为 UTC。北京时间 = UTC + 8，监控窗口：工作日 9:25 - 15:00
-    - cron: '25-55/5 1 * * 1-5'   # 北京 9:25 - 9:55
-    - cron: '*/5 2-6 * * 1-5'     # 北京 10:00 - 14:55
-    - cron: '0 7 * * 1-5'         # 北京 15:00（收盘检测）
-  workflow_dispatch:              # 支持手动触发测试
+    - cron: '*/5 * * * *'         # 全天每 5 分钟给一次触发机会（脚本自行判断时段）
+  workflow_dispatch:              # 手动触发
     inputs:
       force:
-        description: '跳过时段闸门（测试用）'
+        description: '跳过时段闸门与循环（测试用，只跑一次）'
         type: boolean
         default: false
 
 permissions:
-  contents: write                 # 允许回写 state.json（同时保活仓库，避免 60 天被停用）
+  contents: write                 # 允许回写 state.json（同时保活仓库）
 
 concurrency:
   group: astock-monitor
-  cancel-in-progress: false
+  cancel-in-progress: false       # 保证同一时间只有一个会话在跑，避免重复推送
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 355          # 单 job 上限 6h；本任务最长循环 5h45m
     steps:
       - uses: actions/checkout@v4
 
-      - name: 运行监控
+      - name: 运行监控（触发后循环覆盖至收盘）
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK || vars.WECOM_WEBHOOK }}
           THRESHOLD: ${{ vars.THRESHOLD || '5000' }}
@@ -35,6 +36,7 @@ jobs:
         run: python3 monitor_actions.py
 
       - name: 提交状态文件
+        if: always()
         run: |
           git config user.name "monitor-bot"
           git config user.email "actions@users.noreply.github.com"
@@ -47,6 +49,6 @@ jobs:
             echo "状态无变化，跳过提交"
           else
             git commit -m "chore: 更新监控状态 [skip ci]"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
             git push
           fi
-# resync: 2026-10-15
