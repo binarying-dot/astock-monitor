@@ -25,6 +25,19 @@ WECOM_WEBHOOK = (os.environ.get("WECOM_WEBHOOK") or "").strip()
 FORCE = (os.environ.get("FORCE") or "").strip().lower() in ("1", "true", "yes")
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
+# ---- 会话循环参数 ----------------------------------------------------------
+# GitHub 的 cron 在免费账号上会被大幅延迟/丢弃（实测每 1-2 小时才真正触发一次），
+# 因此不能依赖「每 5 分钟触发一次」。改成：只要被触发一次，就在这一个 job 内
+# 自行循环检测，直到收盘为止。这样触发频率再低也能覆盖大半个交易日。
+INTERVAL_MIN = int(os.environ.get("INTERVAL_MIN", "5"))     # 循环内检测间隔（分钟）
+LOOP_ENABLED = (os.environ.get("LOOP", "1").strip().lower() not in ("0", "false", "no"))
+SESSION_START = dt.time(9, 25)      # 开盘后开始检测
+SESSION_END = dt.time(15, 0)        # 收盘
+READY_FROM = dt.time(9, 15)         # 早于此时刻被触发则直接退出（无法覆盖完整时段）
+LUNCH_START = dt.time(11, 30)
+LUNCH_END = dt.time(13, 0)
+MAX_LOOP_SECONDS = 345 * 60         # 单次 job 最长循环 5h45m（GitHub 单 job 上限 6h）
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 PAGE_SIZE = 100
@@ -39,7 +52,7 @@ SOURCES_ORDER = ["eastmoney", "sina"]
 # --------------------------------------------------------------------------
 def now_cn():
     """GitHub runner 是 UTC，统一换算成北京时间。"""
-    return dt.datetime.utcnow() + dt.timedelta(hours=8)
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(hours=8)
 
 
 def log(msg):
@@ -251,35 +264,14 @@ def push_wecom(s):
         return False, "企业微信推送失败: %s" % e
 
 
-def main():
-    t = now_cn()
-    today = t.strftime("%Y-%m-%d")
-
-    # ---- 时段闸门（工作日 9:25-15:00，午休跳过；FORCE=1 时为测试跳过）----
-    if not FORCE:
-        if t.weekday() >= 5:
-            log("周末休市，退出")
-            return 0
-        tt = t.time()
-        if not (dt.time(9, 25) <= tt <= dt.time(15, 0)):
-            log("非监控时段（%s），退出" % t.strftime("%H:%M"))
-            return 0
-        if dt.time(11, 30) < tt < dt.time(13, 0):
-            log("午间休市，退出")
-            return 0
-        if not is_trading_day_now():
-            log("今日为节假日休市，退出")
-            return 0
-    else:
-        log("⚠️ FORCE 测试模式：跳过时段闸门")
-
-    # ---- 抓取 ----
+def run_check(today):
+    """执行一次检测：抓取 → 判断 → 按需推送 → 写状态。返回快照或 None。"""
     try:
         s = snapshot()
     except Exception as e:
         log("抓取失败: %s" % e)
         write_summary("⚠️ 行情抓取失败：%s" % e)
-        return 0                      # 不让 Actions 报红，避免噪音邮件
+        return None
 
     log("[%s] 涨 %d / 跌 %d / 平 %d ｜ 下跌占比 %.2f%% ｜ 耗时 %.2fs"
         % (s["source"], s["up"], s["down"], s["flat"], s["down_ratio"], s["elapsed"]))
@@ -290,36 +282,96 @@ def main():
         "| 上涨家数 | %d |\n| 下跌占比 | %.2f%% |\n| 阈值 | %d |"
         % (s["time"], s["source"], s["down"], s["up"], s["down_ratio"], THRESHOLD))
 
-    # ---- 状态与告警 ----
     state = load_state()
     state_changed = False
-    first_run_today = state.get("date") != today
-    triggered = s["down"] >= THRESHOLD
-
-    if first_run_today:
+    if state.get("date") != today:
         state = {"date": today, "pushed": False}
         state_changed = True
         log("今日首次检测，状态已重置")
 
-    action = "未触发"
-    if triggered:
+    state["last_check"] = s["time"]
+    state["last_down"] = s["down"]
+    state["checks"] = int(state.get("checks") or 0) + 1
+    state_changed = True
+
+    if s["down"] >= THRESHOLD:
         if state.get("pushed"):
-            action = "今日已告警过，跳过"
-            log(action)
+            log("今日已告警过，跳过（当前跌 %d 家）" % s["down"])
         else:
             ok, msg = push_wecom(s)
             log(msg)
-            action = msg
             if ok:
                 state["pushed"] = True
                 state["pushed_at"] = s["time"]
                 state["down_at_push"] = s["down"]
-                state_changed = True
+    else:
+        log("结果: 未触发（跌 %d 家 < 阈值 %d 家）" % (s["down"], THRESHOLD))
 
     if state_changed:
-        save_state(state)             # 交给 workflow 步骤 commit，同时保活仓库
+        save_state(state)             # 交给 workflow 步骤 commit
+    return s
 
-    log("结果: %s" % action)
+
+def main():
+    t = now_cn()
+    today = t.strftime("%Y-%m-%d")
+
+    # ---- 测试模式：跳过闸门、只跑一次 ----
+    if FORCE:
+        log("⚠️ FORCE 测试模式：跳过时段闸门与循环，仅检测一次")
+        run_check(today)
+        return 0
+
+    # ---- 时段闸门 ----
+    if t.weekday() >= 5:
+        log("周末休市，退出")
+        return 0
+    tt = t.time()
+    if tt > SESSION_END:
+        log("已收盘（%s），退出" % t.strftime("%H:%M"))
+        return 0
+    if tt < READY_FROM:
+        log("尚未进入监控窗口（%s），退出" % t.strftime("%H:%M"))
+        return 0
+    if not is_trading_day_now():
+        log("今日为节假日休市，退出")
+        return 0
+
+    # 9:15-9:25 之间被触发：等到 9:25 再开始，以覆盖整个时段
+    if tt < SESSION_START:
+        wait_s = (dt.datetime.combine(t.date(), SESSION_START) - t).total_seconds()
+        log("早于开盘 %.1f 分钟，等待至 09:25 开始" % (wait_s / 60.0))
+        time.sleep(max(0.0, wait_s))
+
+    if not LOOP_ENABLED:
+        run_check(today)
+        return 0
+
+    # ---- 会话循环：一次触发覆盖到收盘 ----
+    loop_t0 = time.time()
+    log("进入会话循环：每 %d 分钟检测一次，直至 15:00 收盘" % INTERVAL_MIN)
+    rounds = 0
+    while now_cn().time() <= SESSION_END:
+        if time.time() - loop_t0 > MAX_LOOP_SECONDS:
+            log("已达单次会话时长上限，本轮结束（下次触发将继续覆盖）")
+            break
+
+        nxt = now_cn().time()
+        if LUNCH_START < nxt < LUNCH_END:
+            log("午间休市（%s），%d 分钟后继续" % (now_cn().strftime("%H:%M"), INTERVAL_MIN))
+            time.sleep(INTERVAL_MIN * 60)
+            continue
+
+        rounds += 1
+        log("---- 第 %d 次检测 ----" % rounds)
+        run_check(today)
+
+        if now_cn().time() >= SESSION_END:
+            break
+        time.sleep(INTERVAL_MIN * 60)
+
+    log("会话结束：本次 job 共检测 %d 次，耗时 %.1f 分钟"
+        % (rounds, (time.time() - loop_t0) / 60.0))
     return 0
 
 
