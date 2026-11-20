@@ -1,7 +1,9 @@
 {
-  "date": "2026-11-18",
-  "pushed": false,
-  "last_check": "2026-11-18 14:55:00",
-  "last_down": 4111,
-  "checks": 43
+  "date": "2026-11-20",
+  "pushed": true,
+  "last_check": "2026-11-20 14:58:05",
+  "last_down": 5139,
+  "checks": 23,
+  "pushed_at": "2026-11-20 13:01:03",
+  "down_at_push": 5031
 }
